@@ -19,6 +19,7 @@ from tenacity import (
 
 global logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 home_dir = os.path.expanduser("~")
 env_path = os.path.join(home_dir, "picture-store-anime.env")
 load_dotenv(dotenv_path=env_path)
@@ -50,12 +51,17 @@ def scan_images(store_from: str):
 
 def generate_thumbnail(image_path: pathlib.Path, thumbnail_path: pathlib.Path, size=(128, 128)):
 
+    logger.debug(f"Generating thumbnail for {image_path} at {thumbnail_path}")
+
     if not thumbnail_path.parent.exists():
         with PIL.Image.open(image_path) as img:
             img.thumbnail(size)
             img.save(thumbnail_path)
 
 def copy_to_vault(image_path: pathlib.Path, vault_path: pathlib.Path):
+
+    logger.debug(f"Copying image to vault: {vault_path}")
+
     if not vault_path.parent.exists():
         shutil.copy2(image_path, vault_path)
 
@@ -83,8 +89,11 @@ def process_image(image_path: pathlib.Path, conn: sqlite3.Connection):
         # すでにDBに登録されている場合
         image_id = row[0]
         tqdm.write(f"Skipped DB insert (already exists): {file_name}")
-        # 必要に応じて、ここで return して完全にスキップするか、
-        # タグの更新処理だけ続けるか選べます。今回は完全にスキップする例：
+
+        # ファイルの実体操作
+        generate_thumbnail(image_path, pathlib.Path(os.path.join(os.getenv("PICTURE_STORE_ANIME_THUMBNAIL_PATH"), thumbnail_name)))
+        copy_to_vault(image_path, pathlib.Path(os.path.join(os.getenv("PICTURE_STORE_ANIME_VAULT_PATH"), vault_name)))
+
         return
     else:
         # 新規登録の場合のみ PixAI の重い処理を走らせる
