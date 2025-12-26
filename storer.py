@@ -53,17 +53,24 @@ def generate_thumbnail(image_path: pathlib.Path, thumbnail_path: pathlib.Path, s
 
     logger.debug(f"Generating thumbnail for {image_path} at {thumbnail_path}")
 
-    if not thumbnail_path.parent.exists():
-        with PIL.Image.open(image_path) as img:
-            img.thumbnail(size)
-            img.save(thumbnail_path)
+    if thumbnail_path.parent.exists():
+        if not thumbnail_path.exists():
+            with PIL.Image.open(image_path) as img:
+                img.thumbnail(size)
+                img.save(thumbnail_path)
 
 def copy_to_vault(image_path: pathlib.Path, vault_path: pathlib.Path):
 
+    logger.debug(f"Examining vault path: {vault_path.parent}")
+    if vault_path.parent.exists():
+        logger.debug(f"Vault path exists: {vault_path.parent}")
+    else:
+        logger.debug(f"Vault path does not exist, will create: {vault_path.parent}")
     logger.debug(f"Copying image to vault: {vault_path}")
 
-    if not vault_path.parent.exists():
-        shutil.copy2(image_path, vault_path)
+    if vault_path.parent.exists():
+        if not vault_path.exists():
+            safe_copy2(image_path, vault_path)
 
 def apply_tag_threshold(tags_list: list, threshold: float):
     # 各要素は {"name": "...", "confidence": ...} の辞書
@@ -82,7 +89,7 @@ def process_image(image_path: pathlib.Path, conn: sqlite3.Connection):
     file_name = image_path.name
 
     # --- 衝突チェック & 既存 ID 取得 ---
-    cursor = conn.execute("SELECT id FROM images WHERE file_name = ?", (file_name,))
+    cursor = conn.execute("SELECT id, vault_path, thumbnail_path FROM images WHERE file_name = ?", (file_name,))
     row = cursor.fetchone()
 
     if row:
@@ -91,6 +98,9 @@ def process_image(image_path: pathlib.Path, conn: sqlite3.Connection):
         tqdm.write(f"Skipped DB insert (already exists): {file_name}")
 
         # ファイルの実体操作
+        vault_name = row[1]
+        thumbnail_name = row[2]
+
         generate_thumbnail(image_path, pathlib.Path(os.path.join(os.getenv("PICTURE_STORE_ANIME_THUMBNAIL_PATH"), thumbnail_name)))
         copy_to_vault(image_path, pathlib.Path(os.path.join(os.getenv("PICTURE_STORE_ANIME_VAULT_PATH"), vault_name)))
 
@@ -169,6 +179,17 @@ def safe_stat(path: pathlib.Path):
     # retry 引数に custom predicate を渡すことも可能です
     return path.is_file()
 
+@retry(
+    retry=retry_if_exception_type(OSError),
+    stop=stop_after_attempt(int(retry_stop_attempt)),
+    wait=wait_exponential(multiplier=waits_multiplier, min=waits_exponential_min, max=waits_exponential_max),
+    # ネットワークタイムアウト(121)の場合のみリトライ
+    retry_error_callback=lambda retry_state: False
+)
+def safe_copy2(src: pathlib.Path, dst: pathlib.Path):
+    """WinError 121対策のリトライ付きファイルコピー"""
+    shutil.copy2(src, dst)
+
 def process(conn: sqlite3.Connection):
     store_from = os.getenv("PICTURE_STORE_ANIME_STORE_FROM")
     vault_path = os.getenv("PICTURE_STORE_ANIME_VAULT_PATH")
@@ -201,6 +222,15 @@ def prepair_tables(conn: sqlite3.Connection):
         thumbnail_path TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS imagehashes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_id INTEGER NOT NULL UNIQUE,
+        phash VARCHAR(255) NOT NULL UNIQUE,
+        FOREIGN KEY (image_id) REFERENCES images(id)
+    )
+    """)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags (
