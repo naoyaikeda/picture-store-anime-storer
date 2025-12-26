@@ -50,14 +50,18 @@ def scan_images(store_from: str):
             yield path
 
 def generate_thumbnail(image_path: pathlib.Path, thumbnail_path: pathlib.Path, size=(128, 128)):
-
     logger.debug(f"Generating thumbnail for {image_path} at {thumbnail_path}")
 
     if thumbnail_path.parent.exists():
+        # ここに「サムネイルがまだ存在しない場合のみ実行する」条件を入れるのが効率的です
         if not thumbnail_path.exists():
-            with PIL.Image.open(image_path) as img:
-                img.thumbnail(size)
-                img.save(thumbnail_path)
+            img = safe_thumb(image_path, size)
+            img.save(thumbnail_path)
+    else:
+        # 親ディレクトリがない場合は作成してから保存（保険的ロジック）
+        thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+        img = safe_thumb(image_path, size)
+        img.save(thumbnail_path)
 
 def copy_to_vault(image_path: pathlib.Path, vault_path: pathlib.Path):
 
@@ -178,6 +182,18 @@ def safe_stat(path: pathlib.Path):
     # winerror 121 を確実に拾うため、明示的に例外をフィルタリングする場合は
     # retry 引数に custom predicate を渡すことも可能です
     return path.is_file()
+
+@retry(
+    retry=retry_if_exception_type(OSError),
+    stop=stop_after_attempt(int(retry_stop_attempt)),
+    wait=wait_exponential(multiplier=waits_multiplier, min=waits_exponential_min, max=waits_exponential_max),
+    reraise=True
+)
+def safe_thumb(image_path: pathlib.Path, size=(128, 128)):
+    """リトライ付きサムネイル生成"""
+    with PIL.Image.open(image_path) as img:
+        img.thumbnail(size)
+        return img
 
 @retry(
     retry=retry_if_exception_type(OSError),
