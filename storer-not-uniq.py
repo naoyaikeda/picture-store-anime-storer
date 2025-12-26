@@ -6,6 +6,7 @@ import uuid
 import shutil
 import sys
 import json
+import hashlib
 from argparse import ArgumentParser
 import PIL.Image as Image
 import PIL
@@ -30,6 +31,20 @@ retry_stop_attempt = int(os.getenv("STOP_AFTER_ATTEMPT", 5))
 waits_multiplier = float(os.getenv("WAITS_MULTIPLIER", 1))
 waits_exponential_min = int(os.getenv("WAITS_EXPONENTIAL_MIN", 2))
 waits_exponential_max = int(os.getenv("WAITS_EXPONENTIAL_MAX", 10))
+
+@retry(
+    retry=retry_if_exception_type(OSError),
+    stop=stop_after_attempt(int(retry_stop_attempt)),
+    wait=wait_exponential(multiplier=waits_multiplier, min=waits_exponential_min, max=waits_exponential_max),
+    reraise=True # 最終的にダメなら例外を投げる
+)
+def get_file_hash(filepath):
+    hasher = hashlib.sha256() # 使用するハッシュアルゴリズムを指定
+    with open(filepath, 'rb') as f:
+        while chunk := f.read(8192): # ファイルを8KBずつ読み込む
+            hasher.update(chunk)
+
+    return hasher.hexdigest() # ハッシュ値を16進数で返す
 
 def prepair_dir(path: str):
     dir_path = pathlib.Path(path)
@@ -95,17 +110,30 @@ def process_image(image_path: pathlib.Path, conn: sqlite3.Connection):
     file_name = image_path.name
 
     # --- 衝突チェック & 既存 ID 取得 ---
-    cursor = conn.execute("SELECT id, vault_path, thumbnail_path FROM images WHERE file_name = ?", (file_name,))
-    row = cursor.fetchone()
 
-    if row:
-        # すでにDBに登録されている場合
-        image_id = row[0]
-        tqdm.write(f"Skipped DB insert (already exists): {file_name}")
+    cursor = conn.execute("SELECT id, vault_path, thumbnail_path FROM images WHERE file_name = ?", (file_name,))
+    results = cursor.fetchall()
+    is_already = False
+
+    # 汎用的な重複排除（ファイル名に関わらず中身で判定）にする場合
+    file_hash = get_file_hash(image_path)
+    c2 = conn.execute("SELECT image_id FROM imagehashes WHERE phash = ?", (file_hash,))
+    r2 = c2.fetchone()
+
+    if r2:
+        is_already = True
+
+    if is_already:
+        # 重複が判明した ID を使って images テーブルからパス情報を取得する
+        image_id = r2[0]
+        c3 = conn.execute("SELECT vault_path, thumbnail_path, file_name FROM images WHERE id = ?", (image_id,))
+        r3 = c3.fetchone()
+        registered_name = r3[2]
+        tqdm.write(f"Skipped DB insert (already exists): {registered_name}")
 
         # ファイルの実体操作
-        vault_name = row[1]
-        thumbnail_name = row[2]
+        vault_name = r3[0]
+        thumbnail_name = r3[1]
 
         generate_thumbnail(image_path, pathlib.Path(os.path.join(os.getenv("PICTURE_STORE_ANIME_THUMBNAIL_PATH"), thumbnail_name)))
         copy_to_vault(image_path, pathlib.Path(os.path.join(os.getenv("PICTURE_STORE_ANIME_VAULT_PATH"), vault_name)))
@@ -131,6 +159,12 @@ def process_image(image_path: pathlib.Path, conn: sqlite3.Connection):
             VALUES (?, ?, ?, ?)
         """, (file_uuid, file_name, vault_name, thumbnail_name))
         image_id = cursor.lastrowid # last_insert_rowid() より直感的
+
+        cursor = conn
+        cursor = conn.execute("""
+            INSERT INTO imagehashes (image_id, phash)
+            VALUES (?, ?)
+        """, (image_id, file_hash))
 
     # --- タグ処理 (新規の場合のみここに到達) ---
     all_tags_list = []
@@ -235,7 +269,7 @@ def prepair_tables(conn: sqlite3.Connection):
     CREATE TABLE IF NOT EXISTS images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uuid VARCHAR(255) NOT NULL UNIQUE,  -- ( ) を外す
-        file_name TEXT NOT NULL UNIQUE,
+        file_name TEXT NOT NULL,
         vault_path TEXT NOT NULL,
         thumbnail_path TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
