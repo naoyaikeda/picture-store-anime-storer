@@ -227,9 +227,24 @@ def safe_stat(path: pathlib.Path):
 )
 def safe_thumb(image_path: pathlib.Path, size=(128, 128)):
     """リトライ付きサムネイル生成"""
+def safe_thumb(image_path: pathlib.Path, size=(128, 128)):
+    """リトライ付きサムネイル生成（色空間の変換対応）"""
     with PIL.Image.open(image_path) as img:
+        # RGBAなどの透過チャンネルがある場合、白背景と合成するか、単に変換する
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            # 背景を白（255, 255, 255）にした新規画像を作成
+            background = PIL.Image.new("RGB", img.size, (255, 255, 255))
+            # アルファチャンネルをマスクとして貼り付け
+            background.paste(img, mask=img.split()[-1])
+            img = background
+        else:
+            # それ以外のモード（PやCMYKなど）も一律RGBに変換
+            img = img.convert("RGB")
+
         img.thumbnail(size)
-        return img
+        # thumbnail()は破壊的メソッドですが、中身が入れ替わったimgを返すために
+        # 一度別の変数で保持するか、コピーを返すようにします
+        return img.copy()
 
 @retry(
     retry=retry_if_exception_type(OSError),
