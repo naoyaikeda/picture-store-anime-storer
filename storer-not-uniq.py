@@ -232,6 +232,8 @@ def safe_thumb(image_path: pathlib.Path, size=(128, 128)):
     with PIL.Image.open(image_path) as img:
         # RGBAなどの透過チャンネルがある場合、白背景と合成するか、単に変換する
         if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            # まずRGBAに変換することで、Pモードの透明度情報もアルファチャンネルに変換される
+            img = img.convert("RGBA")
             # 背景を白（255, 255, 255）にした新規画像を作成
             background = PIL.Image.new("RGB", img.size, (255, 255, 255))
             # アルファチャンネルをマスクとして貼り付け
